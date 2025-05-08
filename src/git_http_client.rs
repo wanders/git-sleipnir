@@ -1,3 +1,6 @@
+use std::error::Error;
+use std::fmt;
+
 use bytes::Bytes;
 use futures::Stream;
 use futures::StreamExt;
@@ -11,11 +14,39 @@ use crate::util::without_lf;
 use crate::RefInfo;
 use crate::ShallowInfo;
 
-use log::{debug, error, trace, warn};
+use log::{debug, error, info, trace, warn};
 use url::Url;
 
 pub struct GitClient {
     client: reqwest::Client,
+}
+
+#[derive(Debug)]
+pub enum GitClientError {
+    ConnectionError(reqwest::Error),
+    ResponseError(String),
+}
+
+impl fmt::Display for GitClientError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            GitClientError::ConnectionError(e) => {
+                write!(f, "Connection Error: '{}'", e)
+            }
+            GitClientError::ResponseError(m) => {
+                write!(f, "Response Error: {}", m)
+            }
+        }
+    }
+}
+
+impl Error for GitClientError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            GitClientError::ConnectionError(e) => Some(e),
+            GitClientError::ResponseError(_) => None,
+        }
+    }
 }
 
 async fn consume_until_delimiter<S, E>(stream: &mut GitPacketLineStream<S>)
@@ -127,7 +158,7 @@ impl GitRepoClient {
     pub async fn ls_refs<T: AsRef<str> + std::fmt::Display>(
         &self,
         ref_prefixes: &[T],
-    ) -> Result<Vec<RefInfo>, reqwest::Error> {
+    ) -> Result<Vec<RefInfo>, GitClientError> {
         let mut retval: Vec<RefInfo> = Vec::new();
 
         let mut pkt = PktLine::new()
@@ -155,7 +186,7 @@ impl GitRepoClient {
             req = req.basic_auth(username, self.password.clone());
         }
 
-        let res = req.send().await?;
+        let res = req.send().await.map_err(GitClientError::ConnectionError)?;
 
         let status = res.status();
         if status.is_success() {
@@ -192,9 +223,29 @@ impl GitRepoClient {
                     }
                 }
             }
-        }
+            Ok(retval)
+        } else {
+            let status = res.status();
+            let url = res.url().clone();
 
-        Ok(retval)
+            let max_len = 1024;
+            let body = res
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read body>".into());
+            let preview = if body.len() > max_len {
+                format!("{}...\n[truncated]", &body[..max_len])
+            } else {
+                body
+            };
+
+            error!("Request to {} failed with status {}", url, status);
+            info!("Response text: {}", preview);
+            Err(GitClientError::ResponseError(format!(
+                "Request failed with status {}",
+                status
+            )))
+        }
     }
 
     async fn upload_pack_req(&self, pkt: Vec<u8>) -> Result<reqwest::Response, reqwest::Error> {
