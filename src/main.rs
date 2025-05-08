@@ -43,6 +43,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     Clone(CloneArgs),
+    FindBranch(FindBranchArgs),
 }
 
 #[derive(Args)]
@@ -70,6 +71,24 @@ struct CloneArgs {
 
     #[arg(required = true)]
     urls: Vec<String>,
+}
+
+#[derive(Args)]
+struct FindBranchArgs {
+    #[arg(long)]
+    branches_starting_with: Option<String>,
+
+    #[arg(long)]
+    branch: String,
+
+    #[arg(long = "branch-fallback", action = clap::ArgAction::Append, value_parser = BranchFallback::parse)]
+    fallbacks: Vec<BranchFallback>,
+
+    #[arg(long)]
+    default_branch: Option<String>,
+
+    #[arg(required = true)]
+    repo_url: String,
 }
 
 fn resolve_urls(base: Option<&Url>, urls: &[String]) -> Result<Vec<Url>, String> {
@@ -203,6 +222,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match opts.command {
         Command::Clone(args) => main_clone(args).await,
+        Command::FindBranch(args) => main_findbranch(args).await,
     }
 }
 
@@ -228,4 +248,39 @@ async fn main_clone(opts: CloneArgs) -> Result<(), Box<dyn Error>> {
         debug!("Wrote tag {tag} to {path}");
     }
     Ok(())
+}
+
+async fn main_findbranch(opts: FindBranchArgs) -> Result<(), Box<dyn Error>> {
+    let wanted_ref = opts
+        .branches_starting_with
+        .map(|b| format!("refs/heads/{}", b))
+        .unwrap_or_else(|| "refs/heads/".to_string());
+
+    let client = GitClient::new();
+    let remote_repo = client.for_url(&Url::parse(&opts.repo_url)?);
+
+    debug!("Listing remote refs (wanted ref: {:?})", wanted_ref);
+    let refs = remote_repo.ls_refs(&[wanted_ref]).await?;
+
+    let mut available_branches = HashMap::<&str, &RefInfo>::new();
+    for r in &refs {
+        if let Some(branchname) = r.refname.strip_prefix("refs/heads/") {
+            available_branches.insert(branchname, r);
+        }
+    }
+
+    let mut branch: Option<&RefInfo> =
+        branch_fallback::resolve(&opts.branch, &opts.fallbacks, &available_branches);
+    debug!("Found branch: {:?}", branch);
+    if branch.is_none() && opts.default_branch.is_some() {
+        branch = available_branches
+            .get(opts.default_branch.as_ref().unwrap().as_str())
+            .map(|v| &**v);
+    }
+    if let Some(branch) = branch {
+        println!("{}", branch.refname.strip_prefix("refs/heads/").unwrap());
+        Ok(())
+    } else {
+        Err("No suitable branch found".into())
+    }
 }
