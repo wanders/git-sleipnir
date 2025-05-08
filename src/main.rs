@@ -4,7 +4,7 @@ use std::error::Error;
 use std::io::Write;
 use std::path::Path;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use url::Url;
 
 use log::{debug, info};
@@ -33,9 +33,20 @@ struct RefInfo {
     peeled: Option<String>,
 }
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(author, version, about)]
-struct Options {
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    Clone(CloneArgs),
+}
+
+#[derive(Args)]
+struct CloneArgs {
     #[arg(long)]
     base_url: Option<Url>,
 
@@ -81,7 +92,7 @@ fn masked_url(orig: &Url) -> String {
     url.to_string()
 }
 
-async fn handle_one(url: &Url, opts: &Options) -> Result<String, Box<dyn Error>> {
+async fn clone_one(url: &Url, opts: &CloneArgs) -> Result<String, Box<dyn Error>> {
     let client = GitClient::new();
 
     let remote_repo = client.for_url(url);
@@ -188,15 +199,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .format_timestamp(None)
         .init();
 
-    let opts = Options::parse();
+    let opts = Cli::parse();
 
+    match opts.command {
+        Command::Clone(args) => main_clone(args).await,
+    }
+}
+
+async fn main_clone(opts: CloneArgs) -> Result<(), Box<dyn Error>> {
     let resolved = resolve_urls(opts.base_url.as_ref(), &opts.urls)?;
 
     let mut repotags = Vec::new();
     for url in &resolved {
         info!("=+============================================================");
         info!(" - {}", masked_url(url));
-        let tag = handle_one(url, &opts).await?;
+        let tag = clone_one(url, &opts).await?;
         info!(" - Tag: {}", tag);
         repotags.push(tag);
     }
