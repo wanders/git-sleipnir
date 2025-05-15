@@ -111,7 +111,13 @@ fn masked_url(orig: &Url) -> String {
     url.to_string()
 }
 
-async fn clone_one(url: &Url, opts: &CloneArgs) -> Result<String, Box<dyn Error>> {
+struct CloneResult {
+    sha: String,
+    branch: String,
+    tag: String,
+}
+
+async fn clone_one(url: &Url, opts: &CloneArgs) -> Result<CloneResult, Box<dyn Error>> {
     let client = GitClient::new();
 
     let remote_repo = client.for_url(url);
@@ -209,7 +215,11 @@ async fn clone_one(url: &Url, opts: &CloneArgs) -> Result<String, Box<dyn Error>
         .map(|t| t.to_string())
         .unwrap();
 
-    Ok(maxtag)
+    Ok(CloneResult {
+        sha: branch.sha.clone(),
+        branch: branch.refname.clone(),
+        tag: maxtag,
+    })
 }
 
 #[tokio::main]
@@ -229,18 +239,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn main_clone(opts: CloneArgs) -> Result<(), Box<dyn Error>> {
     let resolved = resolve_urls(opts.base_url.as_ref(), &opts.urls)?;
 
-    let mut repotags = Vec::new();
+    let mut results = Vec::new();
     for url in &resolved {
         info!("=+============================================================");
         info!(" - {}", masked_url(url));
-        let tag = clone_one(url, &opts).await?;
-        info!(" - Tag: {}", tag);
-        repotags.push(tag);
+        let res = clone_one(url, &opts).await?;
+        info!(
+            " - Done cloning. Branch: {} Tag: {} Sha: {}",
+            res.branch, res.tag, res.sha
+        );
+        results.push(res);
     }
 
     if let Some(path) = opts.tag_output_file {
-        let tag = repotags
+        let tag = results
             .iter()
+            .map(|r| &r.tag)
             .min_by(|a, b| natord::compare(a, b))
             .unwrap();
         let mut file = std::fs::File::create(&path)?;
