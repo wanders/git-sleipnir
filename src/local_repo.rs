@@ -2,6 +2,7 @@ use futures::Stream;
 use futures::StreamExt;
 use std::collections::HashSet;
 use std::error::Error;
+use std::ffi::OsStr;
 use std::fmt;
 use std::io::Write;
 use std::path::Path;
@@ -176,6 +177,55 @@ impl LocalRepo {
         }
 
         wait_result(cmd, || result).await
+    }
+
+    pub async fn distance(&self, from: &str, to: &str) -> Result<usize> {
+        let mut cmd = self
+            .git()
+            .arg("rev-list")
+            .arg(to)
+            .arg("--not")
+            .arg(from)
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(LocalRepoError::ExternalGitCommandSpawnFailure)?;
+
+        let reader = BufReader::new(cmd.stdout.take().expect("Failed to capture stdout"));
+        let mut lines = reader.lines();
+
+        let mut result = 0;
+        while lines.next_line().await.unwrap().is_some() {
+            result += 1;
+        }
+
+        wait_result(cmd, || result).await
+    }
+
+    pub fn basename(&self) -> &OsStr {
+        self.path
+            .file_name()
+            .expect("Path normally has a last component")
+    }
+
+    pub async fn commit_date_iso(&self, sha: &str) -> Result<String> {
+        let out = self
+            .git()
+            .arg("log")
+            .arg("-1")
+            .arg("--pretty=format:%ci")
+            .arg(sha)
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(LocalRepoError::ExternalGitCommandSpawnFailure)?
+            .wait_with_output()
+            .await
+            .map_err(LocalRepoError::ExternalGitCommandSpawnFailure)?;
+        let es = out.status;
+        if es.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        } else {
+            Err(LocalRepoError::ExternalGitCommandError(es))
+        }
     }
 
     fn git(&self) -> tokio::process::Command {

@@ -4,7 +4,7 @@ use std::error::Error;
 use std::io::Write;
 use std::path::Path;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use url::Url;
 
 use log::{debug, info};
@@ -69,8 +69,19 @@ struct CloneArgs {
     #[arg(long)]
     tag_output_file: Option<String>,
 
+    #[arg(long)]
+    manifest_output_file: Option<String>,
+    #[arg(long, value_enum, default_value_t = ManifestFormat::Pretty)]
+    manifest_format: ManifestFormat,
+
     #[arg(required = true)]
     urls: Vec<String>,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum ManifestFormat {
+    Pretty,
+    Yaml,
 }
 
 #[derive(Args)]
@@ -115,6 +126,7 @@ struct CloneResult {
     sha: String,
     branch: String,
     tag: String,
+    local_repo: LocalRepo,
 }
 
 async fn clone_one(url: &Url, opts: &CloneArgs) -> Result<CloneResult, Box<dyn Error>> {
@@ -217,8 +229,13 @@ async fn clone_one(url: &Url, opts: &CloneArgs) -> Result<CloneResult, Box<dyn E
 
     Ok(CloneResult {
         sha: branch.sha.clone(),
-        branch: branch.refname.clone(),
+        branch: branch
+            .refname
+            .strip_prefix("refs/heads/")
+            .unwrap()
+            .to_string(),
         tag: maxtag,
+        local_repo,
     })
 }
 
@@ -234,6 +251,59 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Command::Clone(args) => main_clone(args).await,
         Command::FindBranch(args) => main_findbranch(args).await,
     }
+}
+
+async fn write_manifest(
+    results: &Vec<CloneResult>,
+    path: String,
+    format: ManifestFormat,
+) -> Result<(), Box<dyn Error>> {
+    let mut file = std::fs::File::create(&path)?;
+
+    let max_repo_branch_len = results
+        .iter()
+        .map(|e| e.local_repo.basename().to_string_lossy().len() + e.branch.len() + 2)
+        .max()
+        .unwrap_or(0);
+
+    for r in results {
+        let dist = r.local_repo.distance(&r.tag, &r.sha).await?;
+
+        let timestamp = r.local_repo.commit_date_iso(&r.sha).await?;
+        let repo = r.local_repo.basename().to_string_lossy();
+
+        let desc = if dist == 0 {
+            &r.tag
+        } else {
+            let shortsha = &r.sha[..7];
+            &format!("{}-{}-g{}", r.tag, dist, shortsha)
+        };
+
+        match format {
+            ManifestFormat::Pretty => {
+                let repo_branch = format!("{}({})", repo, r.branch);
+                writeln!(
+                    file,
+                    "{:width$} ({}): {}",
+                    repo_branch,
+                    timestamp,
+                    desc,
+                    width = max_repo_branch_len
+                )?;
+            }
+            ManifestFormat::Yaml => {
+                writeln!(
+                    file,
+                    "- repo: {}\n  branch: {}\n  sha: {}\n  timestamp: {}\n  description: {}\n",
+                    repo, r.branch, r.sha, timestamp, desc
+                )?;
+            }
+        }
+    }
+
+    debug!("Wrote manifest to {path}");
+
+    Ok(())
 }
 
 async fn main_clone(opts: CloneArgs) -> Result<(), Box<dyn Error>> {
@@ -261,6 +331,11 @@ async fn main_clone(opts: CloneArgs) -> Result<(), Box<dyn Error>> {
         file.write_all(tag.as_bytes())?;
         debug!("Wrote tag {tag} to {path}");
     }
+
+    if let Some(path) = opts.manifest_output_file {
+        write_manifest(&results, path, opts.manifest_format).await?;
+    }
+
     Ok(())
 }
 
