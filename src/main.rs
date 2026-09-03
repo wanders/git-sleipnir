@@ -254,11 +254,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn write_manifest(
-    results: &Vec<CloneResult>,
-    path: String,
+    results: &[CloneResult],
+    path: &str,
     format: ManifestFormat,
 ) -> Result<(), Box<dyn Error>> {
-    let mut file = std::fs::File::create(&path)?;
+    let mut file = std::fs::File::create(path)?;
 
     let max_repo_branch_len = results
         .iter()
@@ -333,7 +333,7 @@ async fn main_clone(opts: CloneArgs) -> Result<(), Box<dyn Error>> {
     }
 
     if let Some(path) = opts.manifest_output_file {
-        write_manifest(&results, path, opts.manifest_format).await?;
+        write_manifest(&results, &path, opts.manifest_format).await?;
     }
 
     Ok(())
