@@ -477,4 +477,6 @@ async fn main_findbranch(opts: FindBranchArgs) -> Result<(), Box<dyn Error>> {
         .ok_or::<Box<dyn std::error::Error>>("No suitable branch found".into())?;
 
     println!("{}", branch.refname.strip_prefix("refs/heads/").unwrap());
+
+    Ok(())
 }
