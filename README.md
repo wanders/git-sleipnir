@@ -12,7 +12,7 @@ The main features are:
 
 ## USAGE
 
-`git-sleipnir` has two commands `clone` and `find-branch`.
+`git-sleipnir` has three commands `clone`, `clone-tag` and `find-branch`.
 
 
 ### FIND-BRANCH
@@ -53,6 +53,17 @@ be used to limit branch and tag search to the specified prefixes.
 
 `--tag-output-file` and `--manifest-output-file` can be specified to
 write metadata about the cloned repositories to specified files.
+
+
+### CLONE-TAG
+
+`git-sleipnir clone-tag` clones multiple repositories. Similar to the
+`clone` command it expects URLs to multiple repositories, optionally
+using `--base-url`, but instead of finding branches it takes a single
+`--tag` argument, and expects that tag to exist in all repositories,
+and does a shallow clone and checking out that tag in each
+repository. It also allows writing a manifest file using
+`--manifest-output-file` option.
 
 
 ## THEORY OF OPERATION

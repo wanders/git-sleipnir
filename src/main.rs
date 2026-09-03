@@ -44,6 +44,7 @@ struct Cli {
 enum Command {
     Clone(CloneArgs),
     FindBranch(FindBranchArgs),
+    CloneTag(CloneTagArgs),
 }
 
 #[derive(Args)]
@@ -68,6 +69,23 @@ struct CloneArgs {
 
     #[arg(long)]
     tag_output_file: Option<String>,
+
+    #[arg(long)]
+    manifest_output_file: Option<String>,
+    #[arg(long, value_enum, default_value_t = ManifestFormat::Pretty)]
+    manifest_format: ManifestFormat,
+
+    #[arg(required = true)]
+    urls: Vec<String>,
+}
+
+#[derive(Args)]
+struct CloneTagArgs {
+    #[arg(long)]
+    base_url: Option<Url>,
+
+    #[arg(long, required = true)]
+    tag: String,
 
     #[arg(long)]
     manifest_output_file: Option<String>,
@@ -124,7 +142,7 @@ fn masked_url(orig: &Url) -> String {
 
 struct CloneResult {
     sha: String,
-    branch: String,
+    branch: Option<String>,
     tag: String,
     local_repo: LocalRepo,
 }
@@ -225,12 +243,69 @@ async fn clone_one(url: &Url, opts: &CloneArgs) -> Result<CloneResult, Box<dyn E
 
     Ok(CloneResult {
         sha: branch.sha.clone(),
-        branch: branch
-            .refname
-            .strip_prefix("refs/heads/")
-            .unwrap()
-            .to_string(),
+        branch: Some(
+            branch
+                .refname
+                .strip_prefix("refs/heads/")
+                .unwrap()
+                .to_string(),
+        ),
         tag: maxtag,
+        local_repo,
+    })
+}
+
+async fn clone_one_tag(url: &Url, opts: &CloneTagArgs) -> Result<CloneResult, Box<dyn Error>> {
+    let client = GitClient::new();
+
+    let remote_repo = client.for_url(url);
+
+    let mut local_repo_path = url
+        .path_segments()
+        .and_then(|mut s| s.next_back())
+        .expect("Not a proper path");
+    if let Some(stripped) = local_repo_path.strip_suffix(".git") {
+        local_repo_path = stripped;
+    }
+    info!("Creating local repo {}", local_repo_path);
+
+    let local_repo = LocalRepo::init_new(Path::new(local_repo_path)).await?;
+
+    debug!("Finding tag at remote");
+    let wanted_ref = format!("refs/tags/{}", opts.tag);
+
+    /*
+     * ls_refs does prefix matching. And also from git documentation:
+     *  Note that this is purely for optimization; a server MAY
+     *  show refs not matching the prefix if it chooses, and clients
+     *  should filter the result themselves.
+     */
+    let tag_ref = remote_repo
+        .ls_refs(&[&wanted_ref])
+        .await?
+        .into_iter()
+        .find(|r| r.refname == wanted_ref)
+        .ok_or("Requested tag not found")?;
+
+    debug!("found: {tag_ref:?}");
+
+    remote_repo
+        .shallow_fetch(&local_repo, &tag_ref.sha, 1)
+        .await?;
+
+    local_repo
+        .update_ref(&tag_ref.refname, &tag_ref.sha)
+        .await?;
+    local_repo
+        .update_head_detached(&tag_ref.peeled.unwrap())
+        .await?;
+
+    local_repo.checkout_head().await?;
+
+    Ok(CloneResult {
+        sha: tag_ref.sha.clone(),
+        branch: None,
+        tag: opts.tag.clone(),
         local_repo,
     })
 }
@@ -246,6 +321,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match opts.command {
         Command::Clone(args) => main_clone(args).await,
         Command::FindBranch(args) => main_findbranch(args).await,
+        Command::CloneTag(args) => main_clone_tag(args).await,
     }
 }
 
@@ -258,7 +334,11 @@ async fn write_manifest(
 
     let max_repo_branch_len = results
         .iter()
-        .map(|e| e.local_repo.basename().to_string_lossy().len() + e.branch.len() + 2)
+        .map(|e| {
+            e.local_repo.basename().to_string_lossy().len()
+                + e.branch.as_ref().map_or(e.tag.len(), |b| b.len())
+                + 2
+        })
         .max()
         .unwrap_or(0);
 
@@ -268,7 +348,9 @@ async fn write_manifest(
         let timestamp = r.local_repo.commit_date_iso(&r.sha).await?;
         let repo = r.local_repo.basename().to_string_lossy();
 
-        let desc = if dist == 0 {
+        let desc = if r.branch.is_none() {
+            &r.sha
+        } else if dist == 0 {
             &r.tag
         } else {
             let shortsha = &r.sha[..7];
@@ -277,7 +359,11 @@ async fn write_manifest(
 
         match format {
             ManifestFormat::Pretty => {
-                let repo_branch = format!("{}({})", repo, r.branch);
+                let repo_branch = if let Some(branch) = &r.branch {
+                    format!("{}({})", repo, branch)
+                } else {
+                    format!("{}({})", repo, r.tag)
+                };
                 writeln!(
                     file,
                     "{:width$} ({}): {}",
@@ -287,13 +373,18 @@ async fn write_manifest(
                     width = max_repo_branch_len
                 )?;
             }
-            ManifestFormat::Yaml => {
-                writeln!(
+            ManifestFormat::Yaml => match &r.branch {
+                Some(branch) => writeln!(
                     file,
                     "- repo: {}\n  branch: {}\n  sha: {}\n  timestamp: {}\n  description: {}\n",
-                    repo, r.branch, r.sha, timestamp, desc
-                )?;
-            }
+                    repo, branch, r.sha, timestamp, desc
+                )?,
+                None => writeln!(
+                    file,
+                    "- repo: {}\n  tag: {}\n  sha: {}\n  timestamp: {}\n",
+                    repo, r.tag, r.sha, timestamp
+                )?,
+            },
         }
     }
 
@@ -312,7 +403,9 @@ async fn main_clone(opts: CloneArgs) -> Result<(), Box<dyn Error>> {
         let res = clone_one(url, &opts).await?;
         info!(
             " - Done cloning. Branch: {} Tag: {} Sha: {}",
-            res.branch, res.tag, res.sha
+            res.branch.as_ref().unwrap(),
+            res.tag,
+            res.sha
         );
         results.push(res);
     }
@@ -326,6 +419,25 @@ async fn main_clone(opts: CloneArgs) -> Result<(), Box<dyn Error>> {
         let mut file = std::fs::File::create(&path)?;
         file.write_all(tag.as_bytes())?;
         debug!("Wrote tag {tag} to {path}");
+    }
+
+    if let Some(path) = opts.manifest_output_file {
+        write_manifest(&results, &path, opts.manifest_format).await?;
+    }
+
+    Ok(())
+}
+
+async fn main_clone_tag(opts: CloneTagArgs) -> Result<(), Box<dyn Error>> {
+    let resolved = resolve_urls(opts.base_url.as_ref(), &opts.urls)?;
+
+    let mut results = Vec::new();
+    for url in &resolved {
+        info!("=+============================================================");
+        info!(" - {}", masked_url(url));
+        let res = clone_one_tag(url, &opts).await?;
+        info!(" - Done cloning. Tag: {} Sha: {}", res.tag, res.sha);
+        results.push(res);
     }
 
     if let Some(path) = opts.manifest_output_file {

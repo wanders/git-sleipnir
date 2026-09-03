@@ -146,6 +146,20 @@ impl LocalRepo {
         .await
     }
 
+    pub async fn update_head_detached(&self, commitish: &str) -> Result<()> {
+        wait_result(
+            self.git()
+                .arg("update-ref")
+                .arg("--no-deref")
+                .arg("HEAD")
+                .arg(commitish)
+                .spawn()
+                .map_err(LocalRepoError::ExternalGitCommandSpawnFailure)?,
+            || (),
+        )
+        .await
+    }
+
     pub async fn checkout_head(&self) -> Result<()> {
         wait_result(
             self.git()
