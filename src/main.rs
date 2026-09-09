@@ -172,19 +172,15 @@ async fn clone_one(url: &Url, opts: &CloneArgs) -> Result<CloneResult, Box<dyn E
         }
     }
 
-    let mut branch: Option<&RefInfo> =
-        branch_fallback::resolve(&opts.branch, &opts.fallbacks, &available_branches);
-    debug!("Found branch: {:?}", branch);
-    if branch.is_none() && opts.default_branch.is_some() {
-        branch = available_branches
-            .get(opts.default_branch.as_ref().unwrap().as_str())
-            .map(|v| &**v);
-    }
-    if branch.is_none() {
-        panic!("No suitable branch found");
-    }
-
-    let branch = branch.unwrap();
+    let branch = branch_fallback::resolve(&opts.branch, &opts.fallbacks, &available_branches)
+        .or_else(|| {
+            opts.default_branch.as_ref().and_then(|default_branch| {
+                available_branches
+                    .get(default_branch.as_str())
+                    .map(|v| &**v)
+            })
+        })
+        .ok_or::<Box<dyn std::error::Error>>("No suitable branch found".into())?;
     debug!("Using branch: {} (sha: {})", branch.refname, branch.sha);
 
     info!("Getting: {}", branch.refname);
@@ -358,18 +354,15 @@ async fn main_findbranch(opts: FindBranchArgs) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let mut branch: Option<&RefInfo> =
-        branch_fallback::resolve(&opts.branch, &opts.fallbacks, &available_branches);
-    debug!("Found branch: {:?}", branch);
-    if branch.is_none() && opts.default_branch.is_some() {
-        branch = available_branches
-            .get(opts.default_branch.as_ref().unwrap().as_str())
-            .map(|v| &**v);
-    }
-    if let Some(branch) = branch {
-        println!("{}", branch.refname.strip_prefix("refs/heads/").unwrap());
-        Ok(())
-    } else {
-        Err("No suitable branch found".into())
-    }
+    let branch = branch_fallback::resolve(&opts.branch, &opts.fallbacks, &available_branches)
+        .or_else(|| {
+            opts.default_branch.as_ref().and_then(|default_branch| {
+                available_branches
+                    .get(default_branch.as_str())
+                    .map(|v| &**v)
+            })
+        })
+        .ok_or::<Box<dyn std::error::Error>>("No suitable branch found".into())?;
+
+    println!("{}", branch.refname.strip_prefix("refs/heads/").unwrap());
 }
